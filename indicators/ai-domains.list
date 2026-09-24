@@ -1,0 +1,30 @@
+# Domains blocked while AI lockout is active.
+# One domain per line, blank lines and lines starting with # are ignored.
+# Edit this file, then re-run ai-domain-block-install.sh (with sudo) to
+# apply changes - the enforcement script only trusts the root-owned copy
+# it installs to /etc/omarchy-ai-lockout/domains.list, not this source file,
+# so edits here don't take effect until you reinstall.
+#
+# Note: github.com/copilot can't be listed here - it's a path on github.com,
+# not its own domain, and blocking github.com would break all of GitHub.
+# However, GitHub Copilot's actual completions/chat backend runs on separate
+# hostnames (per GitHub's own allowlist docs), so blocking those below
+# breaks Copilot's functionality even though the github.com/copilot page
+# itself still loads.
+chatgpt.com
+www.chatgpt.com
+chat.openai.com
+claude.ai
+gemini.google.com
+copilot.microsoft.com
+perplexity.ai
+www.perplexity.ai
+githubcopilot.com
+api.githubcopilot.com
+api.individual.githubcopilot.com
+api.business.githubcopilot.com
+api.enterprise.githubcopilot.com
+copilot-proxy.githubusercontent.com
+origin-tracker.githubusercontent.com
+copilot-telemetry.githubusercontent.com
+default.exp-tas.com

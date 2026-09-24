@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Root-owned enforcement script for the AI domain blocker. This is installed
+# to /usr/local/bin/omarchy-ai-domain-block (root:root, mode 755) by
+# ai-domain-block-install.sh and invoked via a narrow NOPASSWD sudoers rule
+# that only permits this exact path with the literal "lock"/"unlock"
+# arguments. Because it lives outside the user's home and only root can
+# write to it, the NOPASSWD rule can't be abused to run arbitrary code as
+# root - the domain list it reads is likewise root-owned so it can't be
+# tampered with by an unprivileged process either.
+#
+# Usage: omarchy-ai-domain-block {lock|unlock}
+set -euo pipefail
+
+HOSTS_FILE="/etc/hosts"
+DOMAINS_FILE="/etc/omarchy-ai-lockout/domains.list"
+BEGIN_MARK="# BEGIN OMARCHY AI LOCKOUT"
+END_MARK="# END OMARCHY AI LOCKOUT"
+
+strip_block() {
+  awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+    $0==b {skip=1; next}
+    $0==e {skip=0; next}
+    skip!=1 {print}
+  ' "$HOSTS_FILE"
+}
+
+atomic_replace() {
+  # $1 = source file with the new full contents
+  install -m 644 -o root -g root "$1" "$HOSTS_FILE"
+}
+
+do_lock() {
+  local tmp
+  tmp=$(mktemp)
+  strip_block > "$tmp"
+  {
+    cat "$tmp"
+    echo "$BEGIN_MARK"
+    if [[ -f "$DOMAINS_FILE" ]]; then
+      while IFS= read -r domain; do
+        [[ -z "$domain" || "$domain" == \#* ]] && continue
+        echo "0.0.0.0 $domain"
+      done < "$DOMAINS_FILE"
+    fi
+    echo "$END_MARK"
+  } > "$tmp.new"
+  atomic_replace "$tmp.new"
+  rm -f "$tmp" "$tmp.new"
+}
+
+do_unlock() {
+  local tmp
+  tmp=$(mktemp)
+  strip_block > "$tmp"
+  atomic_replace "$tmp"
+  rm -f "$tmp"
+}
+
+case "${1:-}" in
+  lock) do_lock ;;
+  unlock) do_unlock ;;
+  *)
+    echo "usage: omarchy-ai-domain-block {lock|unlock}" >&2
+    exit 2
+    ;;
+esac
