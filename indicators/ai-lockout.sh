@@ -77,8 +77,15 @@ resolve_path() {
 # .desktop/launcher entry (which may not have a visible terminal at all, or
 # may close it before a printed message can be read).
 write_stub() {
-  local cmd="$1" path="$2"
-  cat > "$path" <<STUB
+  local cmd="$1" path="$2" tmp
+  # Write to a temp file in the same directory, then rename over the
+  # target instead of writing to $path directly. If $path is the
+  # currently-running executable (e.g. locking out `copilot` while this
+  # very script is running as `copilot`), opening it for writing fails
+  # with "Text file busy" - but rename() just repoints the directory
+  # entry, so it works even while the old inode is still executing.
+  tmp="$(dirname "$path")/.$(basename "$path").ai-lockout.tmp"
+  cat > "$tmp" <<STUB
 #!/usr/bin/env bash
 $STUB_MARKER: $cmd
 title="AI is off"
@@ -89,7 +96,8 @@ if command -v notify-send >/dev/null 2>&1; then
 fi
 exit 1
 STUB
-  chmod +x "$path"
+  chmod +x "$tmp"
+  mv -f "$tmp" "$path"
 }
 
 do_lock() {
@@ -111,7 +119,9 @@ do_unlock() {
   if [[ -f "$PATHS_FILE" ]]; then
     while IFS='|' read -r cmd path; do
       if [[ -n "$cmd" && -n "$path" && -f "$BACKUP_DIR/$cmd" ]]; then
-        cp -p "$BACKUP_DIR/$cmd" "$path"
+        tmp="$(dirname "$path")/.$(basename "$path").ai-lockout.tmp"
+        cp -p "$BACKUP_DIR/$cmd" "$tmp"
+        mv -f "$tmp" "$path"
         rm -f "$BACKUP_DIR/$cmd"
       fi
     done < "$PATHS_FILE"
