@@ -100,6 +100,20 @@ STUB
   mv -f "$tmp" "$path"
 }
 
+# Pops a desktop notification reporting the new lock state, so toggling the
+# indicator gives feedback even when the bar icon update is easy to miss.
+# Uses Omarchy's own notification sender (same one used elsewhere, e.g.
+# ~/.config/hypr/input.lua) rather than notify-send directly, for consistent
+# styling/glyph support across the desktop.
+notify_state_change() {
+  local glyph="$1" title="$2" body="$3"
+  if command -v omarchy >/dev/null 2>&1; then
+    omarchy notification send --app-name="AI Lockout" -g "$glyph" -u normal -t 6000 "$title" "$body" >/dev/null 2>&1 || true
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "AI Lockout" "$title" "$body" >/dev/null 2>&1 || true
+  fi
+}
+
 do_lock() {
   if is_locked; then return 0; fi
   : > "$PATHS_FILE"
@@ -113,6 +127,7 @@ do_lock() {
   done
   do_domain_lock
   touch "$LOCK_FLAG"
+  notify_state_change "󱚧" "AI Availability: OFF" "AI CLIs and sites are now blocked."
 }
 
 do_unlock() {
@@ -128,6 +143,7 @@ do_unlock() {
   fi
   do_domain_unlock
   rm -f "$LOCK_FLAG" "$PATHS_FILE"
+  notify_state_change "󰚩" "AI Availability: ON" "AI CLIs and sites are now allowed."
 }
 
 # Domain blocking (chatgpt.com etc.) needs root to edit /etc/hosts, so it's
