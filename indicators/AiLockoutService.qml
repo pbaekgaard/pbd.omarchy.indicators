@@ -39,6 +39,16 @@ Item {
     id: toggleProc
     command: ["bash", root.scriptPath, "toggle"]
     onExited: function(exitCode) {
+      // Exit 3 means already locked: unlocking requires the gated terminal flow.
+      if (exitCode === 3) unlockProc.running = true
+      else root.refresh()
+    }
+  }
+
+  Process {
+    id: unlockProc
+    command: ["omarchy-launch-floating-terminal-with-presentation", "bash '" + root.scriptPath + "' unlock"]
+    onExited: function(exitCode) {
       root.refresh()
     }
   }

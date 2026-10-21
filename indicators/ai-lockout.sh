@@ -2,11 +2,17 @@
 # Blocks or unblocks AI CLI tools by swapping their real executable for a
 # stub that refuses to run.
 #
-# Usage: ai-lockout.sh {status|toggle|lock|unlock}
-#   status  - prints "locked" (exit 0) or "unlocked" (exit 1)
-#   toggle  - flips the current state
-#   lock    - blocks the configured AI CLIs
-#   unlock  - restores the configured AI CLIs
+# Usage: ai-lockout.sh {status|toggle|menu-toggle|lock|unlock|unlock-now|exclude|exclusion}
+#   status      - prints "locked" (exit 0) or "unlocked" (exit 1)
+#   toggle      - locks if unlocked; if locked, exits 3 (caller must run `unlock`)
+#   menu-toggle - like toggle, but opens the gated unlock in a floating
+#                 terminal itself (for callers without a terminal, e.g. the menu)
+#   lock        - blocks the configured AI CLIs (no friction)
+#   unlock      - interactive gated unlock: password + cooldown + typed phrase
+#   unlock-now  - ungated restore, used internally after the gate passes
+#   exclude     - interactive picker for a date/time; locks AI and refuses
+#                 every unlock until then (cold turkey)
+#   exclusion   - prints the exclusion end time (exit 0) or nothing (exit 1)
 #
 # Add/remove commands to guard in TARGETS below.
 set -euo pipefail
@@ -27,6 +33,7 @@ STATE_DIR="$HOME/.local/state/omarchy-ai-lockout"
 LOCK_FLAG="$STATE_DIR/locked"
 PATHS_FILE="$STATE_DIR/paths.list"
 BACKUP_DIR="$STATE_DIR/backups"
+EXCLUSION_FILE="$STATE_DIR/exclusion_until"
 
 # Marker embedded in the stub script so we can recognize it (and refuse to
 # "back up" a stub over itself if lock is somehow called twice).
@@ -130,7 +137,29 @@ do_lock() {
   notify_state_change "󱚧" "AI Availability: OFF" "AI CLIs and sites are now blocked."
 }
 
+# Prints the exclusion end (epoch seconds) and succeeds while it's in the
+# future; clears an expired exclusion.
+exclusion_until() {
+  local until
+  [[ -f "$EXCLUSION_FILE" ]] || return 1
+  until=$(<"$EXCLUSION_FILE")
+  if [[ "$until" =~ ^[0-9]+$ ]] && (( until > $(date +%s) )); then
+    echo "$until"
+    return 0
+  fi
+  rm -f "$EXCLUSION_FILE"
+  return 1
+}
+
+exclusion_refuse_message() {
+  local until
+  until=$(exclusion_until) || return 1
+  echo "Exclusion active: AI stays off until $(date -d "@$until" '+%A %Y-%m-%d %H:%M')." >&2
+  notify_state_change "󱚧" "AI exclusion active" "AI stays off until $(date -d "@$until" '+%a %d %b %H:%M')."
+}
+
 do_unlock() {
+  if exclusion_refuse_message; then return 1; fi
   if [[ -f "$PATHS_FILE" ]]; then
     while IFS='|' read -r cmd path; do
       if [[ -n "$cmd" && -n "$path" && -f "$BACKUP_DIR/$cmd" ]]; then
@@ -176,17 +205,116 @@ do_domain_unlock() {
   fi
 }
 
+UNLOCK_COOLDOWN=60
+UNLOCK_PHRASE="I am choosing to turn AI back on"
+
+# Unlocking is deliberately hard: lock is one click, but turning AI back on
+# needs (1) a real password check, (2) a cooldown you must sit through, and
+# (3) typing a confirmation phrase by hand. Ctrl-C at any point aborts.
+unlock_gate() {
+  if [[ ! -t 0 ]]; then
+    echo "Unlock must be run from an interactive terminal." >&2
+    return 1
+  fi
+  echo "Turning AI back on takes effort on purpose."
+  echo
+  echo "Step 1/3: password"
+  sudo -k
+  if ! sudo -v; then
+    echo "Wrong password. AI stays off." >&2
+    return 1
+  fi
+  sudo -k
+  echo
+  echo "Step 2/3: cooldown. Ask yourself if you really need AI right now."
+  for ((i = UNLOCK_COOLDOWN; i > 0; i--)); do
+    printf '\r  %2ds remaining (Ctrl-C to cancel) ' "$i"
+    sleep 1
+  done
+  printf '\r%40s\r' ""
+  echo
+  echo "Step 3/3: type this exactly to confirm:"
+  echo "  $UNLOCK_PHRASE"
+  local answer
+  read -r -p "> " answer
+  if [[ "$answer" != "$UNLOCK_PHRASE" ]]; then
+    echo "Phrase did not match. AI stays off." >&2
+    return 1
+  fi
+  do_unlock
+}
+
+# Interactive picker (run in a terminal): choose a day, then a time. The
+# exclusion can only be extended, never shortened.
+exclude_picker() {
+  if ! command -v gum >/dev/null 2>&1; then
+    echo "gum is required for the exclusion picker." >&2
+    return 1
+  fi
+  local current="" days=() labels=() i label day time picked epoch
+  current=$(exclusion_until) || true
+  echo "Trigger Exclusion: AI stays OFF until the time you pick. No way back before then."
+  [[ -n "$current" ]] && echo "Current exclusion ends $(date -d "@$current" '+%A %Y-%m-%d %H:%M') (can only be extended)."
+  echo
+  for i in $(seq 0 30); do
+    day=$(date -d "+$i day" +%F)
+    label=$(date -d "$day" '+%a %d %b %Y')
+    case $i in 0) label="$label (today)";; 1) label="$label (tomorrow)";; esac
+    days+=("$day"); labels+=("$label")
+  done
+  echo "Day:"
+  picked=$(printf '%s\n' "${labels[@]}" | gum choose --height 12) || return 1
+  for i in "${!labels[@]}"; do [[ "${labels[$i]}" == "$picked" ]] && day="${days[$i]}"; done
+  echo "Day: $picked"
+  echo "Hour:"
+  time=$(printf '%02d:00\n' $(seq 0 23) | gum choose --height 12 --selected "08:00") || return 1
+  echo "Minute:"
+  time="${time%:*}:$(printf '%02d\n' 00 15 30 45 | gum choose --height 4)" || return 1
+  epoch=$(date -d "$day $time" +%s 2>/dev/null) || { echo "Invalid date." >&2; return 1; }
+  if (( epoch <= $(date +%s) )); then
+    echo "That time is in the past." >&2
+    return 1
+  fi
+  if [[ -n "$current" ]] && (( epoch < current )); then
+    echo "An existing exclusion can't be shortened." >&2
+    return 1
+  fi
+  echo
+  gum confirm "Block AI until $(date -d "@$epoch" '+%A %d %b %Y %H:%M')? You will NOT be able to turn it on before then." || return 1
+  do_lock
+  echo "$epoch" > "$EXCLUSION_FILE"
+  notify_state_change "󱚧" "AI exclusion started" "AI stays off until $(date -d "@$epoch" '+%a %d %b %H:%M')."
+}
+
 case "${1:-status}" in
   status)
     if is_locked; then echo locked; exit 0; else echo unlocked; exit 1; fi
     ;;
   toggle)
-    if is_locked; then do_unlock; else do_lock; fi
+    if is_locked; then exit 3; else do_lock; fi
     ;;
+  menu-toggle)
+    if is_locked; then
+      exec omarchy-launch-floating-terminal-with-presentation "bash '$(readlink -f "$0")' unlock"
+    else
+      do_lock
+    fi
+    ;;
+  exclude) exclude_picker ;;
+  exclusion) exclusion_until ;;
   lock) do_lock ;;
-  unlock) do_unlock ;;
+  unlock)
+    if is_locked; then
+      if exclusion_refuse_message; then
+        read -r -n 1 -s -p "Press any key to close." || true
+        exit 1
+      fi
+      unlock_gate
+    fi
+    ;;
+  unlock-now) do_unlock ;;
   *)
-    echo "usage: ai-lockout.sh {status|toggle|lock|unlock}" >&2
+    echo "usage: ai-lockout.sh {status|toggle|menu-toggle|lock|unlock|unlock-now|exclude|exclusion}" >&2
     exit 2
     ;;
 esac
